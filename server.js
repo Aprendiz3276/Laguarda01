@@ -24,30 +24,65 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
-
-// Archivos estáticos
 app.use(express.static(__dirname));
 
-// IMPORTANTE: Inicializar base de datos ANTES de las rutas
+// Variable para controlar inicialización
 let dbInitialized = false;
+let dbInitializing = false;
 
-// Middleware para verificar DB
+// Middleware para inicializar DB bajo demanda
 app.use(async (req, res, next) => {
-  if (!dbInitialized && req.path.startsWith('/api')) {
-    try {
-      await initializeDatabase();
-      dbInitialized = true;
-    } catch (error) {
-      console.error('Error inicializando DB:', error);
-      return res.status(503).json({ 
-        error: 'Base de datos no disponible',
-        message: error.message 
-      });
-    }
+  // Solo inicializar para rutas API
+  if (!req.path.startsWith('/api/')) {
+    return next();
   }
-  next();
+
+  // Si ya está inicializada, continuar
+  if (dbInitialized) {
+    return next();
+  }
+
+  // Si está inicializando, esperar
+  if (dbInitializing) {
+    let attempts = 0;
+    const checkInterval = setInterval(() => {
+      attempts++;
+      if (dbInitialized) {
+        clearInterval(checkInterval);
+        return next();
+      }
+      if (attempts > 50) { // 5 segundos máximo
+        clearInterval(checkInterval);
+        return res.status(503).json({ 
+          error: 'Base de datos no disponible',
+          message: 'Timeout inicializando base de datos'
+        });
+      }
+    }, 100);
+    return;
+  }
+
+  // Inicializar por primera vez
+  dbInitializing = true;
+  try {
+    console.log('🔄 Inicializando base de datos...');
+    await initializeDatabase();
+    dbInitialized = true;
+    dbInitializing = false;
+    console.log('✅ Base de datos inicializada correctamente');
+    next();
+  } catch (error) {
+    dbInitializing = false;
+    console.error('❌ Error inicializando base de datos:', error);
+    return res.status(503).json({ 
+      error: 'Base de datos no disponible',
+      message: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
 });
 
 // Health check
@@ -57,7 +92,8 @@ app.get('/api/health', (req, res) => {
     message: 'Servidor funcionando',
     timestamp: new Date().toISOString(),
     nodeEnv: process.env.NODE_ENV,
-    dbInitialized: dbInitialized
+    dbInitialized: dbInitialized,
+    dbType: process.env.DB_TYPE || 'not set'
   });
 });
 
@@ -72,18 +108,22 @@ app.get('/', (req, res) => {
   res.sendFile(join(__dirname, 'index.html'));
 });
 
-// Manejo de errores
+// Error handler
 app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(err.status || 500).json({
     error: true,
-    message: err.message || 'Error interno del servidor'
+    message: err.message || 'Error interno del servidor',
+    details: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
 });
 
-// 404
+// 404 handler
 app.use((req, res) => {
-  res.status(404).json({ error: true, message: 'Ruta no encontrada' });
+  res.status(404).json({ 
+    error: true, 
+    message: 'Ruta no encontrada' 
+  });
 });
 
 // Solo para desarrollo local
@@ -92,6 +132,7 @@ if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
     dbInitialized = true;
     app.listen(PORT, () => {
       console.log(`✅ Servidor en http://localhost:${PORT}`);
+      console.log(`✅ Base de datos: ${process.env.DB_TYPE || 'sqlite'}`);
     });
   }).catch(err => {
     console.error('❌ Error:', err);
